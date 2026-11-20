@@ -1,0 +1,241 @@
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, bail};
+use serde::Serialize;
+
+const DATA_ROOT_ENV: &str = "DUCK_TOOLBOX_DATA_ROOT";
+const ANDROID_DATA_ROOT: &str = "/data/adb/duck-toolbox";
+const ANDROID_LITE_DATA_ROOT: &str = "/data/adb/duck-toolbox-lite";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppPaths {
+    pub root: PathBuf,
+    pub data_root: PathBuf,
+    pub var_dir: PathBuf,
+    pub profile_path: PathBuf,
+    pub profile_secrets_path: PathBuf,
+    pub outputs_dir: PathBuf,
+    pub tmp_dir: PathBuf,
+    pub logs_dir: PathBuf,
+    pub log_path: PathBuf,
+    pub wrapper_path: PathBuf,
+    pub binary_path: PathBuf,
+}
+
+impl AppPaths {
+    pub fn discover() -> Result<Self> {
+        // Jerry Manager (and any other embedder) runs `duckd` without a Duck ToolBox module, so
+        // the root is resolved in this order and never *requires* `module.prop`:
+        //   1. DUCK_TOOLBOX_ROOT, taken as given (made absolute, not validated);
+        //   2. a real module root found next to the binary / working directory;
+        //   3. DUCK_TOOLBOX_DATA_ROOT, so a data-only embedding still works.
+        let root = match env::var_os("DUCK_TOOLBOX_ROOT").filter(|v| !v.is_empty()) {
+            Some(explicit) => resolve_root(PathBuf::from(explicit))?,
+            None => match find_module_root() {
+                Ok(found) => found,
+                Err(error) => match env::var_os(DATA_ROOT_ENV).filter(|v| !v.is_empty()) {
+                    Some(data) => resolve_root(PathBuf::from(data))?,
+                    None => return Err(error),
+                },
+            },
+        };
+
+        let data_root = resolve_data_root(
+            &root,
+            env::var_os(DATA_ROOT_ENV).map(PathBuf::from),
+            cfg!(target_os = "android"),
+        );
+        Ok(Self::for_root(&root, &data_root))
+    }
+
+    /// Lays out every runtime path under an explicit module root and data root.
+    pub fn for_root(root: &Path, data_root: &Path) -> Self {
+        let var_dir = data_root.join("var");
+        let logs_dir = var_dir.join("logs");
+
+        Self {
+            root: root.to_path_buf(),
+            data_root: data_root.to_path_buf(),
+            profile_path: var_dir.join("profile.toml"),
+            profile_secrets_path: var_dir.join("profile.secrets.toml"),
+            outputs_dir: var_dir.join("outputs"),
+            // Scratch space follows TMPDIR, so it never creates a `var/tmp` under the data root.
+            tmp_dir: env::temp_dir().join("duckd"),
+            log_path: logs_dir.join("duckd.log"),
+            logs_dir,
+            var_dir,
+            wrapper_path: root.join("bin").join("duckctl.sh"),
+            binary_path: root.join("bin").join("duckd"),
+        }
+    }
+
+    pub fn ensure_runtime_dirs(&self) -> Result<()> {
+        for dir in [
+            &self.var_dir,
+            &self.outputs_dir,
+            &self.logs_dir,
+        ] {
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+        Ok(())
+    }
+
+    pub fn resolve_in_root(&self, path: &str) -> PathBuf {
+        let candidate = Path::new(path);
+        if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            resolve_relative_path(&self.root, &self.data_root, candidate)
+        }
+    }
+}
+
+fn resolve_data_root(
+    module_root: &Path,
+    explicit_data_root: Option<PathBuf>,
+    target_is_android: bool,
+) -> PathBuf {
+    if let Some(explicit) = explicit_data_root.filter(|path| !path.as_os_str().is_empty()) {
+        if explicit.is_absolute() {
+            return explicit;
+        }
+        return module_root.join(explicit);
+    }
+
+    if target_is_android {
+        if module_root
+            .file_name()
+            .is_some_and(|name| name == "duck-toolbox-lite")
+        {
+            return PathBuf::from(ANDROID_LITE_DATA_ROOT);
+        }
+        return PathBuf::from(ANDROID_DATA_ROOT);
+    }
+
+    module_root.to_path_buf()
+}
+
+fn resolve_relative_path(module_root: &Path, data_root: &Path, candidate: &Path) -> PathBuf {
+    match candidate.components().next() {
+        Some(std::path::Component::Normal(component)) if component == "var" => {
+            data_root.join(candidate)
+        }
+        _ => module_root.join(candidate),
+    }
+}
+
+fn find_module_root() -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.push(env::current_dir().context("read current directory")?);
+
+    if let Ok(exe) = env::current_exe() {
+        candidates.push(exe);
+    }
+
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+
+    for candidate in candidates {
+        for ancestor in candidate.ancestors() {
+            if looks_like_module_root(ancestor) {
+                return resolve_root(ancestor.to_path_buf());
+            }
+        }
+    }
+
+    bail!("failed to locate Duck ToolBox module root")
+}
+
+fn resolve_root(root: PathBuf) -> Result<PathBuf> {
+    let root = if root.is_absolute() {
+        root
+    } else {
+        env::current_dir()
+            .context("read current directory")?
+            .join(root)
+    };
+
+    Ok(root)
+}
+
+fn looks_like_module_root(path: &Path) -> bool {
+    path.join("module.prop").is_file()
+        && (path.join("ui").is_dir() || path.join("webroot").is_dir() || path.join("bin").is_dir())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{ANDROID_DATA_ROOT, resolve_data_root, resolve_relative_path, resolve_root};
+
+    #[test]
+    fn non_android_defaults_data_root_to_module_root() {
+        let module_root = Path::new("/workspace/duck-toolbox");
+
+        let data_root = resolve_data_root(module_root, None, false);
+
+        assert_eq!(data_root, module_root);
+    }
+
+    #[test]
+    fn android_defaults_data_root_to_shared_adb_directory() {
+        let data_root = resolve_data_root(Path::new("/data/adb/modules/duck-toolbox"), None, true);
+
+        assert_eq!(data_root, PathBuf::from(ANDROID_DATA_ROOT));
+    }
+
+    #[test]
+    fn android_lite_uses_separate_data_in_active_and_pending_installations() {
+        for path in [
+            "/data/adb/modules/duck-toolbox-lite",
+            "/data/adb/modules_update/duck-toolbox-lite",
+        ] {
+            assert_eq!(
+                resolve_data_root(Path::new(path), None, true),
+                PathBuf::from(super::ANDROID_LITE_DATA_ROOT),
+            );
+        }
+    }
+
+    #[test]
+    fn relative_var_paths_resolve_under_data_root() {
+        let resolved = resolve_relative_path(
+            Path::new("/data/adb/modules/duck-toolbox"),
+            Path::new("/data/adb/duck-toolbox"),
+            Path::new("var/outputs/keybox.xml"),
+        );
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/data/adb/duck-toolbox/var/outputs/keybox.xml")
+        );
+    }
+
+    #[test]
+    fn non_var_relative_paths_stay_under_module_root() {
+        let resolved = resolve_relative_path(
+            Path::new("/data/adb/modules/duck-toolbox"),
+            Path::new("/data/adb/duck-toolbox"),
+            Path::new("bin/duckctl.sh"),
+        );
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/data/adb/modules/duck-toolbox/bin/duckctl.sh")
+        );
+    }
+
+    #[test]
+    fn explicit_root_does_not_need_module_prop() {
+        let dir = std::env::temp_dir().join(format!("duck-root-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let root = resolve_root(dir.clone()).unwrap();
+
+        assert_eq!(root, dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

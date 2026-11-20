@@ -1,0 +1,54 @@
+name: Build duckd (rkp-device only)
+
+on:
+  workflow_dispatch:
+
+env:
+  TARGET: aarch64-linux-android
+  ANDROID_API_LEVEL: 26
+  NDK_VERSION: r30
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK build-tools (for V1 bridge)
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'build-tools;36.0.0'
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Build duckd with ONLY rkp-device
+        env:
+          TOOLCHAIN: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin
+        run: |
+          export CC_aarch64_linux_android="${TOOLCHAIN}/${TARGET}${ANDROID_API_LEVEL}-clang"
+          export CXX_aarch64_linux_android="${TOOLCHAIN}/${TARGET}${ANDROID_API_LEVEL}-clang++"
+          export AR_aarch64_linux_android="${TOOLCHAIN}/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${CC_aarch64_linux_android}"
+          cargo build --locked --release --package duckd \
+            --no-default-features --features rkp-device \
+            --target "${TARGET}"
+          install -D -m 0755 "target/${TARGET}/release/duckd" artifact/duckd
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: duckd-rkp-device
+          path: artifact/duckd
