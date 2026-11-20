@@ -39,3 +39,7 @@ Local (needs Rust, the `aarch64-linux-android` target, Android NDK and SDK
 build-tools for the V1 bridge): see `.github/workflows/rkp-device-only.yml`.
 
     cargo test --locked --workspace
+
+## Credits
+
+- **RKP Device / RKP Extractor** — Originally developed by [Eltavine](https://github.com/eltavine) in [Duck ToolBox](https://github.com/eltavine/Duck-ToolBox). Used with permission, subject to the original license.
