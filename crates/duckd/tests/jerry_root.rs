@@ -6,7 +6,7 @@ use std::{path::Path, process::Command};
 use serde_json::Value;
 
 fn run(root: Option<&Path>, data: &Path) -> Value {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rkp_extractor"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_duckd"));
     command
         .args(["rkp-device", "status"])
         .env("DUCK_TOOLBOX_DATA_ROOT", data)
@@ -43,7 +43,7 @@ fn data_root_alone_is_enough_when_no_root_is_given() {
 fn a_run_leaves_no_var_logs_or_tmp_behind() {
     let data = tempfile::tempdir().unwrap();
     let scratch = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_rkp_extractor"))
+    let output = Command::new(env!("CARGO_BIN_EXE_duckd"))
         .args(["rkp-device", "status"])
         .env("DUCK_TOOLBOX_ROOT", data.path())
         .env("DUCK_TOOLBOX_DATA_ROOT", data.path())
