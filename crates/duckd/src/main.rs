@@ -18,7 +18,7 @@ static FEATURES: &[&dyn Feature] = &[
 
 fn cli() -> clap::Command {
     let description = "Duck ToolBox backend (device RKP issuer only). API subcommands print one JSON envelope.";
-    clap::Command::new("duckd")
+    clap::Command::new("rkp_extractor")
         .version(env!("CARGO_PKG_VERSION"))
         .about(description)
         .arg(
